@@ -73,6 +73,39 @@ class GeminiImagePlugin(Star):
 
         self._global_config_loaded = False
 
+    def _is_private_chat(self, event: AstrMessageEvent) -> bool:
+        """更稳健地判断是否私聊，避免仅依赖 group_id 导致误判。"""
+        # 1) 优先使用框架可能提供的 is_private_chat
+        try:
+            checker = getattr(event, "is_private_chat", None)
+            if callable(checker):
+                val = checker()
+                if isinstance(val, bool):
+                    return val
+        except Exception:
+            pass
+
+        # 2) 其次根据 message_obj.type 判断
+        try:
+            msg_obj = getattr(event, "message_obj", None)
+            msg_type = getattr(msg_obj, "type", None)
+            if msg_type is not None:
+                msg_type_str = str(getattr(msg_type, "value", msg_type)).lower()
+                if "private" in msg_type_str or "friend" in msg_type_str:
+                    return True
+                if "group" in msg_type_str:
+                    return False
+        except Exception:
+            pass
+
+        # 3) 最后回退 group_id 规则
+        try:
+            gid = event.get_group_id()
+        except Exception:
+            gid = None
+        gid_str = "" if gid is None else str(gid).strip().lower()
+        return gid_str in ("", "0", "none", "null")
+
     async def _load_global_config(self):
         if self._global_config_loaded:
             return
@@ -121,15 +154,7 @@ class GeminiImagePlugin(Star):
     async def _get_user_config(self, event: AstrMessageEvent) -> Optional[dict]:
         """获取用户个人配置（仅私聊）"""
         try:
-            # 检查是否为私聊
-            gid = None
-            try:
-                gid = event.get_group_id()
-            except Exception:
-                gid = None
-            
-            # 当 gid 为空串/0/None 视为私聊，仅有有效群号时才认为是群聊
-            if gid:
+            if not self._is_private_chat(event):
                 return None
             
             # 私聊，尝试获取用户ID
@@ -190,12 +215,7 @@ class GeminiImagePlugin(Star):
 
     async def _ensure_private_has_config(self, event: AstrMessageEvent):
         """若为私聊则确保已有个人配置，否则返回提示组件"""
-        try:
-            gid = event.get_group_id()
-        except Exception:
-            gid = None
-        # gid 为空串/0/None 都视为私聊
-        if not gid:
+        if self._is_private_chat(event):
             user_cfg = await self._get_user_config(event)
             if not user_cfg:
                 return False, event.plain_result(self._private_config_required_message())
@@ -276,12 +296,7 @@ class GeminiImagePlugin(Star):
             logger.info(f"使用用户个人配置: {api_base} | 模型: {model_name}")
         else:
             # 检查是否为私聊但没有配置
-            try:
-                gid = event.get_group_id()
-            except Exception:
-                gid = None
-            
-            if not gid:
+            if self._is_private_chat(event):
                 # 私聊但没有个人配置
                 yield event.plain_result(self._private_config_required_message())
                 return
@@ -780,13 +795,9 @@ class GeminiImagePlugin(Star):
     async def cmd_set_config(self, event: AstrMessageEvent):
         """设置个人API配置（仅私聊）：/设置ai配置 <api_base> <api_password> [model_name]"""
         # 检查是否为私聊
-        try:
-            gid = event.get_group_id()
-            if gid:
-                yield event.plain_result("该命令仅支持私聊使用")
-                return
-        except Exception:
-            pass
+        if not self._is_private_chat(event):
+            yield event.plain_result("该命令仅支持私聊使用")
+            return
         
         # 提取参数
         full_text = self._get_full_text_input(event, "/设置ai配置")
@@ -829,13 +840,9 @@ class GeminiImagePlugin(Star):
     async def cmd_view_config(self, event: AstrMessageEvent):
         """查看个人API配置（仅私聊）：/查看ai配置"""
         # 检查是否为私聊
-        try:
-            gid = event.get_group_id()
-            if gid:
-                yield event.plain_result("该命令仅支持私聊使用")
-                return
-        except Exception:
-            pass
+        if not self._is_private_chat(event):
+            yield event.plain_result("该命令仅支持私聊使用")
+            return
         
         # 获取配置
         user_config = await self._get_user_config(event)
