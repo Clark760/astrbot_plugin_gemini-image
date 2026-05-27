@@ -1,5 +1,5 @@
-name: astrbot_plugin_gemini_image # 这是你的插件的唯一识别名（必须是合法 Python 模块名）。
+name: astrbot_plugin_gemini_image_fork # 这是你的插件的唯一识别名（必须是合法 Python 模块名）。
 desc: 通过 gcli2api(gemini api) 对接 Gemini 生图/改图并发送到 QQ 改版 # 插件简短描述
-version: v0.5.0 # 插件版本号
+version: v0.1.0 # 插件版本号
 author: mingo # 作者
 repo: https://github.com/ocarrolzvisvardis/astrbot_plugin_gemini-image # 插件的仓库地址（占位）
