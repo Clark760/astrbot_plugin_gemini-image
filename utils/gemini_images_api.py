@@ -1,6 +1,8 @@
 import asyncio
 import base64
+import binascii
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +31,13 @@ class _State:
 
 
 _state = _State()
+_MAX_MESSAGE_CHARS = 1200
+_BASE64_CHARS_RE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
+_DATA_URL_RE = re.compile(r"data:(image/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)")
+_MARKDOWN_DATA_URL_RE = re.compile(
+    r"!\[[^\]]*]\(\s*(data:image/[a-zA-Z0-9.+-]+;base64,[^)]+)\s*\)",
+    re.IGNORECASE,
+)
 
 
 async def _save_bytes(content: bytes, suffix: str = "png") -> str:
@@ -50,9 +59,14 @@ async def _decode_and_save_base64(data_b64: str, mime: Optional[str]) -> str:
             data_b64 = b64
         except Exception:
             pass
-    raw = base64.b64decode(data_b64)
+    normalized_b64 = re.sub(r"\s+", "", data_b64 or "")
+    try:
+        raw = base64.b64decode(normalized_b64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"invalid base64 image payload: {e}") from e
     suffix = "png"
     if mime:
+        mime = mime.lower()
         if "jpeg" in mime:
             suffix = "jpg"
         elif "jpg" in mime:
@@ -62,6 +76,70 @@ async def _decode_and_save_base64(data_b64: str, mime: Optional[str]) -> str:
         elif "png" in mime:
             suffix = "png"
     return await _save_bytes(raw, suffix)
+
+
+def _truncate_message(text: str, max_chars: int = _MAX_MESSAGE_CHARS) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n...(message truncated)"
+
+
+def _detect_image_mime_from_bytes(raw: bytes) -> Optional[str]:
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"RIFF") and len(raw) >= 12 and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if raw.startswith(b"BM"):
+        return "image/bmp"
+    return None
+
+
+def _extract_data_url_payload(data_url: str) -> Tuple[Optional[str], Optional[str]]:
+    m = _DATA_URL_RE.search(data_url or "")
+    if not m:
+        return None, None
+    mime = m.group(1)
+    b64_payload = m.group(2)
+    return mime, b64_payload
+
+
+async def _extract_image_from_text(text: str) -> Tuple[Optional[str], str]:
+    if not text:
+        return None, text
+
+    md_match = _MARKDOWN_DATA_URL_RE.search(text)
+    if md_match:
+        mime, b64_payload = _extract_data_url_payload(md_match.group(1))
+        if mime and b64_payload:
+            image_path = await _decode_and_save_base64(b64_payload, mime)
+            cleaned = (text[: md_match.start()] + text[md_match.end() :]).strip()
+            return image_path, cleaned
+
+    data_match = _DATA_URL_RE.search(text)
+    if data_match:
+        mime = data_match.group(1)
+        b64_payload = data_match.group(2)
+        image_path = await _decode_and_save_base64(b64_payload, mime)
+        cleaned = (text[: data_match.start()] + text[data_match.end() :]).strip()
+        return image_path, cleaned
+
+    candidate = text.strip()
+    compact = re.sub(r"\s+", "", candidate)
+    if len(compact) >= 512 and _BASE64_CHARS_RE.fullmatch(candidate or ""):
+        try:
+            raw = base64.b64decode(compact, validate=True)
+            mime = _detect_image_mime_from_bytes(raw)
+            if mime:
+                image_path = await _decode_and_save_base64(compact, mime)
+                return image_path, ""
+        except (binascii.Error, ValueError):
+            pass
+
+    return None, text
 
 
 def _build_url(api_base: str, path: str, api_key: str, model: str, append_key_query: bool, extra_query: Optional[Dict[str, str]] = None) -> str:
@@ -182,9 +260,9 @@ async def generate_or_edit_image_gemini(
                         # 4xx 明确错误不再重试当前密钥
                         try:
                             err = resp.json()
-                            last_message = str(err.get("error", err))
+                            last_message = _truncate_message(str(err.get("error", err)))
                         except Exception:
-                            last_message = resp.text
+                            last_message = _truncate_message(resp.text)
                             err = {"text": resp.text}
                         logger.error(f"Gemini API 调用失败 {resp.status_code}: {err}")
                         return None, None, last_message
@@ -194,7 +272,7 @@ async def generate_or_edit_image_gemini(
                     # 解析 generateContent 返回结构
                     if isinstance(data, dict):
                         if data.get("error"):
-                            last_message = str(data.get("error"))
+                            last_message = _truncate_message(str(data.get("error")))
                             logger.error(f"Gemini API 返回错误: {data['error']}")
                             return None, None, last_message
 
@@ -211,18 +289,18 @@ async def generate_or_edit_image_gemini(
                     # 没有图片也没有文本，直接把原始 JSON 返回给用户
                     try:
                         raw_text = json.dumps(data, ensure_ascii=False)
-                        last_message = raw_text
+                        last_message = _truncate_message(raw_text)
                     except Exception:
                         last_message = last_message or "Gemini API 响应未包含可解析的图片或文本数据"
                     logger.error("Gemini API 响应未包含可解析的图片或文本数据")
                     return None, None, last_message
 
             except (httpx.ConnectError, httpx.ReadTimeout) as e:
-                last_message = str(e)
+                last_message = _truncate_message(str(e))
                 logger.error(f"网络错误: {e}")
                 continue
             except Exception as e:
-                last_message = str(e)
+                last_message = _truncate_message(str(e))
                 logger.error(f"调用 Gemini API 异常: {e}")
                 continue
 
@@ -252,7 +330,11 @@ async def _parse_generate_content_json_for_image(data: dict) -> Tuple[Optional[s
                     )
                 text_part = p.get("text")
                 if text_part:
-                    texts.append(text_part)
+                    parsed_path, cleaned_text = await _extract_image_from_text(str(text_part))
+                    if parsed_path and not image_path:
+                        image_path = parsed_path
+                    if cleaned_text and cleaned_text.strip():
+                        texts.append(cleaned_text.strip())
         if not texts and data.get("error"):
             err = data.get("error")
             if isinstance(err, dict):
@@ -262,7 +344,7 @@ async def _parse_generate_content_json_for_image(data: dict) -> Tuple[Optional[s
                 texts.append(str(err))
     except Exception as e:
         logger.warning(f"解析 generateContent 响应失败: {e}")
-    message_text = "\n".join(texts) if texts else None
+    message_text = _truncate_message("\n".join(texts)) if texts else None
     return image_url, image_path, message_text
 
 
@@ -336,7 +418,7 @@ async def generate_or_edit_image_gemini_stream(
                         if resp.status_code != 200:
                             try:
                                 err_text = await resp.aread()
-                                last_message = err_text.decode("utf-8", errors="ignore")
+                                last_message = _truncate_message(err_text.decode("utf-8", errors="ignore"))
                                 logger.error(f"流式接口状态 {resp.status_code}: {err_text[:200]}")
                             except Exception:
                                 logger.error(f"流式接口状态 {resp.status_code}")
@@ -359,11 +441,11 @@ async def generate_or_edit_image_gemini_stream(
                                         data_json = json.loads(data_str)
                                     except Exception:
                                         if not last_message:
-                                            last_message = data_str
+                                            last_message = _truncate_message(data_str)
                                         continue
                                     # 错误帧
                                     if isinstance(data_json, dict) and data_json.get("error"):
-                                        last_message = str(data_json.get("error"))
+                                        last_message = _truncate_message(str(data_json.get("error")))
                                         logger.error(f"流式错误帧: {data_json.get('error')}")
                                         break
                                     image_url, image_path, message_text = await _parse_generate_content_json_for_image(data_json)
@@ -386,10 +468,10 @@ async def generate_or_edit_image_gemini_stream(
                                         data_json = json.loads(line.decode("utf-8", errors="ignore"))
                                     except Exception:
                                         if not last_message:
-                                            last_message = line.decode("utf-8", errors="ignore")
+                                            last_message = _truncate_message(line.decode("utf-8", errors="ignore"))
                                         continue
                                     if isinstance(data_json, dict) and data_json.get("error"):
-                                        last_message = str(data_json.get("error"))
+                                        last_message = _truncate_message(str(data_json.get("error")))
                                         logger.error(f"流式分块错误: {data_json.get('error')}")
                                         break
                                     image_url, image_path, message_text = await _parse_generate_content_json_for_image(data_json)
@@ -398,11 +480,11 @@ async def generate_or_edit_image_gemini_stream(
                                     if image_path:
                                         return image_url, image_path, message_text
             except (httpx.ConnectError, httpx.ReadTimeout) as e:
-                last_message = str(e)
+                last_message = _truncate_message(str(e))
                 logger.error(f"流式网络错误: {e}")
                 continue
             except Exception as e:
-                last_message = str(e)
+                last_message = _truncate_message(str(e))
                 logger.error(f"流式调用异常: {e}")
                 continue
 
