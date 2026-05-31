@@ -3,12 +3,14 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, sp
 from astrbot.api.all import *
 from astrbot.core.message.components import Reply, Plain, Image
-from typing import Optional
+from typing import Optional, Dict, Tuple, Any
 import time
 import os
 from pathlib import Path
 import shutil
 import importlib
+import shlex
+import json
 
 try:
     _command_module = importlib.import_module("astrbot.core.star.filter.command")
@@ -272,7 +274,14 @@ class GeminiImagePlugin(Star):
             logger.warning(f"回退本地文件发送，原因: {e}")
             return image_path
 
-    async def gemini_image_tool(self, event: AstrMessageEvent, image_description: str, use_reference_images: bool = True, mode: str = "auto"):
+    async def gemini_image_tool(
+        self,
+        event: AstrMessageEvent,
+        image_description: str,
+        use_reference_images: bool = True,
+        mode: str = "auto",
+        appended_generation_config: Optional[Dict[str, Any]] = None,
+    ):
         """
         Generate or edit images via gcli2api endpoints.
         If images exist in the message/reply and use_reference_images=True, will include them.
@@ -326,6 +335,15 @@ class GeminiImagePlugin(Star):
                             except Exception as e:
                                 logger.warning(f"引用图片转 base64 失败: {e}")
 
+        merged_generation_config: Dict[str, Any] = dict(appended_generation_config or {})
+        effective_temperature = self.temperature
+        if "temperature" in merged_generation_config:
+            try:
+                effective_temperature = float(merged_generation_config.pop("temperature"))
+            except Exception:
+                yield event.plain_result("参数错误：`--temperature` 必须是数字。")
+                return
+
         # 模式与端点选择（流式优先），编辑与生成均走 generateContent，仅差别为是否带参考图
         endpoint_path = self._STREAM_GEN_PATH if self.use_stream else self._GEN_PATH
 
@@ -344,7 +362,8 @@ class GeminiImagePlugin(Star):
                     endpoint_path=endpoint_path,
                     input_images_b64=input_images,
                     max_retry_attempts=self.max_retry_attempts,
-                    temperature=self.temperature,
+                    temperature=effective_temperature,
+                    generation_config=merged_generation_config or None,
                     timeout_seconds=self.request_timeout_seconds,
                 )
                 # 流式失败则回退非流式
@@ -358,7 +377,8 @@ class GeminiImagePlugin(Star):
                         endpoint_path=self._GEN_PATH,
                         input_images_b64=input_images,
                         max_retry_attempts=self.max_retry_attempts,
-                        temperature=self.temperature,
+                        temperature=effective_temperature,
+                        generation_config=merged_generation_config or None,
                         timeout_seconds=self.request_timeout_seconds,
                     )
             else:
@@ -371,7 +391,8 @@ class GeminiImagePlugin(Star):
                     endpoint_path=endpoint_path,
                     input_images_b64=input_images,
                     max_retry_attempts=self.max_retry_attempts,
-                    temperature=self.temperature,
+                    temperature=effective_temperature,
+                    generation_config=merged_generation_config or None,
                     timeout_seconds=self.request_timeout_seconds,
                 )
 
@@ -460,7 +481,11 @@ class GeminiImagePlugin(Star):
     async def cmd_generate(self, event: AstrMessageEvent):
         """生图：/生图 <提示词>"""
         # 提取全文本输入，解决图文混排导致的 GreedyStr 失效
-        prompt = self._get_full_text_input(event, "/生图")
+        prompt_text = self._get_full_text_input(event, "/生图")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         # 群控制与限流
         err = self._check_group_access(event)
@@ -478,14 +503,18 @@ class GeminiImagePlugin(Star):
         yield event.plain_result(f"🎨 收到请求，正在生成 [{display_prompt}]...")
 
         # 然后执行生成并发送结果
-        async for res in self.gemini_image_tool(event, image_description=prompt, use_reference_images=False, mode="generate"):
+        async for res in self.gemini_image_tool(event, image_description=prompt, use_reference_images=False, mode="generate", appended_generation_config=appended_params):
             yield res
 
     @filter.command("改图")
     async def cmd_edit(self, event: AstrMessageEvent):
         """改图（需携带/引用图片）：/改图 <提示词>"""
         # 提取全文本输入
-        prompt = self._get_full_text_input(event, "/改图")
+        prompt_text = self._get_full_text_input(event, "/改图")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         err = self._check_group_access(event)
         if err:
@@ -506,14 +535,18 @@ class GeminiImagePlugin(Star):
         yield event.plain_result(f"🎨 收到请求，正在生成 [{display_prompt}]...")
 
         # 然后执行生成并发送结果
-        async for res in self.gemini_image_tool(event, image_description=prompt, use_reference_images=True, mode="edit"):
+        async for res in self.gemini_image_tool(event, image_description=prompt, use_reference_images=True, mode="edit", appended_generation_config=appended_params):
             yield res
 
     @filter.command("手办化")
     async def cmd_figure(self, event: AstrMessageEvent):
         """手办化（需携带/引用图片）：/手办化 [描述]"""
         # 提取全文本输入
-        prompt = self._get_full_text_input(event, "/手办化")
+        prompt_text = self._get_full_text_input(event, "/手办化")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         err = self._check_group_access(event)
         if err:
@@ -543,14 +576,18 @@ class GeminiImagePlugin(Star):
         yield event.plain_result("🎨 收到请求，正在生成 [手办化]...")
         
         # 然后执行生成并发送结果
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=True, mode="edit"):
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=True, mode="edit", appended_generation_config=appended_params):
             yield res
 
     @filter.command("手办化2")
     async def cmd_figure2(self, event: AstrMessageEvent):
         """手办化2（需携带/引用图片）：/手办化2 [描述]"""
         # 提取全文本输入（英文提示通常也支持）
-        prompt = self._get_full_text_input(event, "/手办化2")
+        prompt_text = self._get_full_text_input(event, "/手办化2")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         err = self._check_group_access(event)
         if err:
@@ -576,7 +613,7 @@ class GeminiImagePlugin(Star):
         if not has_image:
             yield event.plain_result("手办化2需要携带或引用图片，请附图后再发送：/手办化2")
             return
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=True, mode="edit"):
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=True, mode="edit", appended_generation_config=appended_params):
             yield res
 
     @filter.command("aiimg帮助")
@@ -602,7 +639,8 @@ class GeminiImagePlugin(Star):
             "• 设置ai配置 <api_base> <password> [model]\n"
             "• 查看ai配置\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "💡 提示：快速指令后可追加描述以自定义效果"
+            "💡 提示：命令末尾支持 -- 追加参数（生图/改图/快速指令）\n"
+            "例如：/生图 赛博朋克猫咪 --temperature 0.7 --top_p=0.9 --seed 123"
         )
         yield event.plain_result(help_text)
 
@@ -616,7 +654,11 @@ class GeminiImagePlugin(Star):
     async def cmd_poster(self, event: AstrMessageEvent):
         """海报（可携带/引用图片）：/海报 [描述]"""
         # 提取全文本输入
-        prompt = self._get_full_text_input(event, "/海报")
+        prompt_text = self._get_full_text_input(event, "/海报")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         err = self._check_group_access(event)
         if err:
@@ -640,13 +682,17 @@ class GeminiImagePlugin(Star):
         # 先返回生成中提示
         yield event.plain_result("🎨 收到请求，正在生成 [海报]...")
 
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate"):
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
             yield res
 
     @filter.command("壁纸")
     async def cmd_wallpaper(self, event: AstrMessageEvent):
         """壁纸（可携带/引用图片）：/壁纸 [描述]"""
-        prompt = self._get_full_text_input(event, "/壁纸")
+        prompt_text = self._get_full_text_input(event, "/壁纸")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         err = self._check_group_access(event)
         if err:
@@ -668,13 +714,17 @@ class GeminiImagePlugin(Star):
 
         yield event.plain_result("🎨 收到请求，正在生成 [壁纸]...")
 
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate"):
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
             yield res
 
     @filter.command("卡片")
     async def cmd_card(self, event: AstrMessageEvent):
         """卡片（可携带/引用图片）：/卡片 [描述]"""
-        prompt = self._get_full_text_input(event, "/卡片")
+        prompt_text = self._get_full_text_input(event, "/卡片")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         err = self._check_group_access(event)
         if err:
@@ -696,13 +746,17 @@ class GeminiImagePlugin(Star):
 
         yield event.plain_result("🎨 收到请求，正在生成 [卡片]...")
 
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate"):
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
             yield res
 
     @filter.command("手机壁纸")
     async def cmd_phone_wallpaper(self, event: AstrMessageEvent):
         """手机壁纸（可携带/引用图片）：/手机壁纸 [描述]"""
-        prompt = self._get_full_text_input(event, "/手机壁纸")
+        prompt_text = self._get_full_text_input(event, "/手机壁纸")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         err = self._check_group_access(event)
         if err:
@@ -724,14 +778,18 @@ class GeminiImagePlugin(Star):
 
         yield event.plain_result("🎨 收到请求，正在生成 [手机壁纸]...")
 
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate"):
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
             yield res
 
     @filter.command("表情包")
     async def cmd_sticker(self, event: AstrMessageEvent):
         """表情包（可携带/引用图片）：/表情包 [描述]"""
         # 从消息链抽取完整文本，兼容图文混排
-        prompt = self._get_full_text_input(event, "/表情包")
+        prompt_text = self._get_full_text_input(event, "/表情包")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
 
         err = self._check_group_access(event)
         if err:
@@ -754,7 +812,7 @@ class GeminiImagePlugin(Star):
 
         yield event.plain_result("🎨 收到请求，正在生成 [表情包]...")
 
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate"):
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
             yield res
 
     def _check_has_image(self, event: AstrMessageEvent) -> bool:
@@ -790,6 +848,120 @@ class GeminiImagePlugin(Star):
             full_text = full_text[len(cmd_prefix):].strip()
 
         return full_text
+
+    def _coerce_cli_param_value(self, raw_value: str) -> Any:
+        if raw_value is None:
+            return True
+        value = str(raw_value).strip()
+        lower = value.lower()
+        if lower in ("true", "false"):
+            return lower == "true"
+        if lower in ("null", "none"):
+            return None
+        if value.startswith("{") or value.startswith("["):
+            try:
+                return json.loads(value)
+            except Exception:
+                pass
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except Exception:
+            return value
+
+    def _normalize_generation_param_key(self, key: str) -> str:
+        k = (key or "").strip()
+        if not k:
+            return k
+        normalized = k.replace("-", "_").lower()
+        alias_map = {
+            "temperature": "temperature",
+            "top_p": "topP",
+            "topp": "topP",
+            "top_k": "topK",
+            "topk": "topK",
+            "candidate_count": "candidateCount",
+            "candidatecount": "candidateCount",
+            "max_output_tokens": "maxOutputTokens",
+            "maxoutputtokens": "maxOutputTokens",
+            "stop_sequences": "stopSequences",
+            "stopsequences": "stopSequences",
+            "response_mime_type": "responseMimeType",
+            "responsemimetype": "responseMimeType",
+            "response_modalities": "responseModalities",
+            "responsemodalities": "responseModalities",
+            "seed": "seed",
+        }
+        return alias_map.get(normalized, k)
+
+    def _split_prompt_and_append_params(self, text: str) -> Tuple[str, Dict[str, Any], Optional[str]]:
+        """
+        Parse trailing --params in command text.
+        Example: /生图 一只猫 --temperature 0.7 --top_p=0.9 --seed 123
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return "", {}, None
+
+        try:
+            tokens = shlex.split(raw)
+        except Exception:
+            tokens = raw.split()
+
+        if not tokens:
+            return "", {}, None
+
+        # Backtrack from tail: only treat trailing --param block as params.
+        j = len(tokens) - 1
+        while j >= 0:
+            token = tokens[j]
+            if token.startswith("--"):
+                j -= 1
+                continue
+            if j - 1 >= 0 and tokens[j - 1].startswith("--"):
+                j -= 2
+                continue
+            break
+
+        params_start = j + 1
+        if params_start >= len(tokens):
+            return " ".join(tokens), {}, None
+
+        prompt_tokens = tokens[:params_start]
+        param_tokens = tokens[params_start:]
+        if not param_tokens:
+            return " ".join(prompt_tokens), {}, None
+
+        parsed_params: Dict[str, Any] = {}
+        idx = 0
+        while idx < len(param_tokens):
+            tok = param_tokens[idx]
+            if not tok.startswith("--"):
+                return "", {}, f"参数格式错误：`{tok}`。请将所有 `--参数` 放在命令最后。"
+
+            body = tok[2:]
+            if not body:
+                return "", {}, "参数格式错误：检测到空参数名，请使用 `--参数名 值` 或 `--参数名=值`。"
+
+            if "=" in body:
+                key, value = body.split("=", 1)
+            else:
+                key = body
+                if idx + 1 < len(param_tokens) and not param_tokens[idx + 1].startswith("--"):
+                    value = param_tokens[idx + 1]
+                    idx += 1
+                else:
+                    value = "true"
+
+            key = self._normalize_generation_param_key(key)
+            if not key:
+                return "", {}, "参数格式错误：存在空参数名。"
+
+            parsed_params[key] = self._coerce_cli_param_value(value)
+            idx += 1
+
+        return " ".join(prompt_tokens).strip(), parsed_params, None
 
     @filter.command("设置ai配置")
     async def cmd_set_config(self, event: AstrMessageEvent):

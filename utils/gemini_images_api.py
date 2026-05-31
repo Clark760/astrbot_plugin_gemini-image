@@ -174,6 +174,7 @@ async def generate_or_edit_image_gemini(
     max_retry_attempts: int = 3,
     timeout_seconds: int = 60,
     temperature: Optional[float] = None,
+    generation_config: Optional[Dict] = None,
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     使用 gcli2api 的 generateContent 接口生图/改图（通过 parts 注入图片）。
@@ -237,13 +238,14 @@ async def generate_or_edit_image_gemini(
                 ]
             }
             # 附加温度（仅传入 temperature，不包含 topP 等）
+            final_generation_config: Dict = {}
+            if isinstance(generation_config, dict):
+                final_generation_config.update(generation_config)
             if temperature is not None:
-                gen = payload.get("generationConfig", {})
-                gen2 = payload.get("generation_config", {})
-                gen["temperature"] = temperature
-                gen2["temperature"] = temperature
-                payload["generationConfig"] = gen
-                payload["generation_config"] = gen2
+                final_generation_config["temperature"] = temperature
+            if final_generation_config:
+                payload["generationConfig"] = final_generation_config
+                payload["generation_config"] = dict(final_generation_config)
 
             try:
                 async with httpx.AsyncClient(timeout=timeout_seconds) as client:
@@ -358,6 +360,7 @@ async def generate_or_edit_image_gemini_stream(
     max_retry_attempts: int = 3,
     timeout_seconds: int = 60,
     temperature: Optional[float] = None,
+    generation_config: Optional[Dict] = None,
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     调用流式接口（streamGenerateContent）。收到第一帧图片即返回。
@@ -403,13 +406,14 @@ async def generate_or_edit_image_gemini_stream(
             payload: Dict = {
                 "contents": [{"role": "user", "parts": parts}]
             }
+            final_generation_config: Dict = {}
+            if isinstance(generation_config, dict):
+                final_generation_config.update(generation_config)
             if temperature is not None:
-                gen = payload.get("generationConfig", {})
-                gen2 = payload.get("generation_config", {})
-                gen["temperature"] = temperature
-                gen2["temperature"] = temperature
-                payload["generationConfig"] = gen
-                payload["generation_config"] = gen2
+                final_generation_config["temperature"] = temperature
+            if final_generation_config:
+                payload["generationConfig"] = final_generation_config
+                payload["generation_config"] = dict(final_generation_config)
 
             try:
                 async with httpx.AsyncClient(timeout=timeout_seconds) as client:
