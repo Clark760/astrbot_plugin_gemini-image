@@ -3,7 +3,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, sp
 from astrbot.api.all import *
 from astrbot.core.message.components import Reply, Plain, Image
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Dict, Tuple, Any, List
 import time
 import os
 from pathlib import Path
@@ -20,9 +20,10 @@ except Exception:  # AstrBot 未安装时的开发环境降级
         pass
 
 from .utils.file_send_server import send_file
+from .utils.reference_images import image_component_to_data_url
 
 
-@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.1")
+@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.2")
 class GeminiImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -334,24 +335,26 @@ class GeminiImagePlugin(Star):
 
         # api_password 在 Gemini 模式下可为代理密码，在 GPT 模式下通常为 API Key。
 
-        # 收集参考图片（当前消息与引用消息）
-        input_images = []
-        if use_reference_images and hasattr(event, 'message_obj') and event.message_obj and hasattr(event.message_obj, 'message'):
-            for comp in event.message_obj.message:
-                if isinstance(comp, Image):
-                    try:
-                        base64_data = await comp.convert_to_base64()
-                        input_images.append(base64_data)
-                    except Exception as e:
-                        logger.warning(f"参考图片转 base64 失败: {e}")
-                elif isinstance(comp, Reply) and comp.chain:
-                    for reply_comp in comp.chain:
-                        if isinstance(reply_comp, Image):
-                            try:
-                                base64_data = await reply_comp.convert_to_base64()
-                                input_images.append(base64_data)
-                            except Exception as e:
-                                logger.warning(f"引用图片转 base64 失败: {e}")
+        # 收集并规范化参考图片。按真实文件头识别格式，GIF 等会自动转成 PNG。
+        input_images: List[str] = []
+        reference_components = self._get_reference_image_components(event) if use_reference_images else []
+        for index, component in enumerate(reference_components, start=1):
+            try:
+                input_images.append(await image_component_to_data_url(component))
+            except Exception as e:
+                logger.warning(f"第 {index} 张参考图片读取/转换失败: {e}")
+
+        if use_reference_images:
+            logger.info(
+                f"参考图处理完成：识别 {len(reference_components)} 张，成功读取 {len(input_images)} 张；"
+                f"接口类型={provider}，模式={mode}"
+            )
+        if mode == "edit" and not input_images:
+            yield event.plain_result(
+                "❌ 参考图片读取或格式转换失败，已停止本次改图，未降级为普通生图。"
+                "请尝试重新发送 JPG/PNG/WEBP 图片，并查看日志中的“参考图片读取/转换失败”详情。"
+            )
+            return
 
         merged_generation_config: Dict[str, Any] = dict(appended_generation_config or {})
         effective_temperature = self.temperature
@@ -847,17 +850,29 @@ class GeminiImagePlugin(Star):
         async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
             yield res
 
+    def _get_reference_image_components(self, event: AstrMessageEvent) -> List[Image]:
+        """获取当前消息及引用链中的图片组件，兼容嵌套引用并避免重复。"""
+        result: List[Image] = []
+        visited = set()
+
+        def walk(chain):
+            for component in chain or []:
+                component_id = id(component)
+                if component_id in visited:
+                    continue
+                visited.add(component_id)
+                if isinstance(component, Image):
+                    result.append(component)
+                elif isinstance(component, Reply):
+                    walk(getattr(component, "chain", None))
+
+        message_obj = getattr(event, "message_obj", None)
+        walk(getattr(message_obj, "message", None))
+        return result
+
     def _check_has_image(self, event: AstrMessageEvent) -> bool:
-        """检查消息中是否包含图片"""
-        if hasattr(event, 'message_obj') and event.message_obj and hasattr(event.message_obj, 'message'):
-            for comp in event.message_obj.message:
-                if isinstance(comp, Image):
-                    return True
-                if isinstance(comp, Reply) and comp.chain:
-                    for reply_comp in comp.chain:
-                        if isinstance(reply_comp, Image):
-                            return True
-        return False
+        """检查当前消息或引用消息中是否包含图片组件。"""
+        return bool(self._get_reference_image_components(event))
 
     def _get_full_text_input(self, event: AstrMessageEvent, cmd_prefix: str = "") -> str:
         """
