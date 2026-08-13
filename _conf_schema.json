@@ -1,17 +1,23 @@
 {
-  "model_name": {
-    "description": "模型名称",
+  "provider": {
+    "description": "图片模型类型：gemini 原生接口，geminichat 为 /chat/completions，gpt 为 GPT Image 2",
     "type": "string",
-    "hint": "如 gemini-2.5-flash-image-preview",
-    "default": "gemini-2.5-flash-image-preview"
+    "options": ["gemini", "geminichat", "gpt"],
+    "default": "gemini"
+  },
+  "model_name": {
+    "description": "模型名称（必填，按实际服务商提供的模型名填写）",
+    "type": "string",
+    "hint": "必填，例如 gemini-3-pro-image、gpt-image-2 或代理提供的模型名",
+    "default": ""
   },
   "gcli2api_base_url": {
-    "description": "gcli2api 基础地址",
+    "description": "API 基础地址（gemini 可填 gcli2api；gpt 可填 https://api.openai.com 或兼容代理）",
     "type": "string",
     "default": "http://127.0.0.1:7861"
   },
   "gcli2api_api_password": {
-    "description": "gcli2api API 密码（用于 x-goog-api-key 或 Bearer）",
+    "description": "API 密钥/密码（Gemini 使用 x-goog-api-key/Bearer，GPT 使用 Bearer）",
     "type": "string",
     "default": "pwd"
   },

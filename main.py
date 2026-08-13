@@ -19,16 +19,16 @@ except Exception:  # AstrBot 未安装时的开发环境降级
     class GreedyStr(str):
         pass
 
-from .utils.gemini_images_api import generate_or_edit_image_gemini
 from .utils.file_send_server import send_file
 
 
-@register("gemini-image", "薄暝", "对接 gcli2api 的 Gemini 生图/改图并发送到 QQ", "0.4.0")
+@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.0")
 class GeminiImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
 
-        # 仅 gcli2api 后端
+        self.provider = self._normalize_provider(config.get("provider", "gemini"))
+        # 保留原配置名以兼容旧版本；GPT 模式下它表示 OpenAI 兼容 API Base。
         default_base = (config.get("gcli2api_base_url") or "http://127.0.0.1:7861").strip()
         # 固定端点（强制 v1beta），不再提供配置项
         self.api_base = default_base
@@ -36,7 +36,7 @@ class GeminiImagePlugin(Star):
         self._STREAM_GEN_PATH = "/v1beta/models/{model}:streamGenerateContent"
 
         # 模型与重试
-        self.model_name = (config.get("model_name") or "gemini-2.5-flash-image").strip()
+        self.model_name = (config.get("model_name") or "").strip()
         self.max_retry_attempts = int(config.get("max_retry_attempts", 3))
         # 固定策略：默认启用流式，附带 alt=sse；不提供开关
         self.use_stream = True
@@ -74,6 +74,11 @@ class GeminiImagePlugin(Star):
         self.nap_server_port = config.get("nap_server_port")
 
         self._global_config_loaded = False
+
+    @staticmethod
+    def _normalize_provider(provider: Any) -> str:
+        value = str(provider or "gemini").strip().lower()
+        return value if value in ("gemini", "geminichat", "gpt") else "gemini"
 
     def _is_private_chat(self, event: AstrMessageEvent) -> bool:
         """更稳健地判断是否私聊，避免仅依赖 group_id 导致误判。"""
@@ -113,6 +118,9 @@ class GeminiImagePlugin(Star):
             return
         try:
             plugin_config = await sp.global_get("gemini-image", {})
+            if "provider" in plugin_config:
+                self.provider = self._normalize_provider(plugin_config.get("provider"))
+                logger.info(f"从全局配置加载 provider: {self.provider}")
             if "gcli2api_base_url" in plugin_config:
                 self.api_base = str(plugin_config["gcli2api_base_url"]).strip() or self.api_base
                 logger.info(f"从全局配置加载 gcli2api_base_url: {self.api_base}")
@@ -178,7 +186,7 @@ class GeminiImagePlugin(Star):
             logger.warning(f"获取用户配置失败: {e}")
             return None
 
-    async def _save_user_config(self, event: AstrMessageEvent, api_base: str, api_password: str, model_name: Optional[str] = None) -> bool:
+    async def _save_user_config(self, event: AstrMessageEvent, provider: str, api_base: str, api_password: str, model_name: str) -> bool:
         """保存用户个人配置（仅私聊）"""
         try:
             user_id = None
@@ -193,10 +201,10 @@ class GeminiImagePlugin(Star):
             user_config_key = f"gemini-image-user-{user_id}"
             # 保留已有配置，更新本次传入字段
             user_config = await sp.global_get(user_config_key, {})
+            user_config["provider"] = self._normalize_provider(provider)
             user_config["api_base"] = api_base.strip()
             user_config["api_password"] = api_password.strip()
-            if model_name:
-                user_config["model_name"] = model_name.strip()
+            user_config["model_name"] = model_name.strip()
             
             await sp.global_put(user_config_key, user_config)
             logger.info(f"已保存用户 {user_id} 的配置")
@@ -209,9 +217,11 @@ class GeminiImagePlugin(Star):
         return (
             "❌ 私聊使用需要先配置个人API\n\n"
             "请使用以下命令设置：\n"
-            "/设置ai配置 <api_base> <api_password> [model_name]\n\n"
+            "/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>\n\n"
             "例如：\n"
-            "/设置ai配置 http://127.0.0.1:7861 your_password gemini-2.5-flash-image\n\n"
+            "/设置ai配置 gemini http://127.0.0.1:7861 your_password gemini-3-pro-image\n"
+            "/设置ai配置 geminichat http://127.0.0.1:7861 your_password gemini-3-pro-image\n"
+            "/设置ai配置 gpt https://api.openai.com sk-xxx gpt-image-2\n\n"
             "查看当前配置请使用：/查看ai配置"
         )
 
@@ -283,7 +293,7 @@ class GeminiImagePlugin(Star):
         appended_generation_config: Optional[Dict[str, Any]] = None,
     ):
         """
-        Generate or edit images via gcli2api endpoints.
+        Generate or edit images via Gemini generateContent or OpenAI Images API.
         If images exist in the message/reply and use_reference_images=True, will include them.
         mode: "auto" | "generate" | "edit". When "auto", edit if references provided else generate.
         """
@@ -292,17 +302,19 @@ class GeminiImagePlugin(Star):
         await self._maybe_cleanup_images()
 
         # 检查是否为私聊，如果是则尝试加载用户个人配置
+        provider = self.provider
         api_base = self.api_base
         api_password = self.gcli2api_api_password
-        model_name = self.model_name
+        configured_model = self.model_name
         
         user_config = await self._get_user_config(event)
         if user_config:
             # 使用用户个人配置
+            provider = self._normalize_provider(user_config.get("provider", "gemini"))
             api_base = user_config.get("api_base", self.api_base)
             api_password = user_config.get("api_password", self.gcli2api_api_password)
-            model_name = user_config.get("model_name", self.model_name)
-            logger.info(f"使用用户个人配置: {api_base} | 模型: {model_name}")
+            configured_model = user_config.get("model_name", "")
+            logger.info(f"使用用户个人配置: {api_base} | 类型: {provider}")
         else:
             # 检查是否为私聊但没有配置
             if self._is_private_chat(event):
@@ -310,11 +322,17 @@ class GeminiImagePlugin(Star):
                 yield event.plain_result(self._private_config_required_message())
                 return
 
+        model_name = str(configured_model or "").strip()
+        if not model_name:
+            scope = "个人配置" if user_config else "插件全局设置"
+            yield event.plain_result(f"❌ {scope}缺少必填的 model_name，请先填写实际模型名称。")
+            return
+
         # 为提示词添加图片生成目标提示，避免多模态模型返回纯文本
         image_generation_prefix = "【本次任务目标：生成图片】请根据以下描述生成一张图片，必须输出图像而非文本描述：\n"
         image_description = image_generation_prefix + image_description
 
-        # gcli2api 模式：仅需 gcli2api_api_password（默认 pwd），无需官方 API Key
+        # api_password 在 Gemini 模式下可为代理密码，在 GPT 模式下通常为 API Key。
 
         # 收集参考图片（当前消息与引用消息）
         input_images = []
@@ -344,7 +362,7 @@ class GeminiImagePlugin(Star):
                 yield event.plain_result("参数错误：`--temperature` 必须是数字。")
                 return
 
-        # 模式与端点选择（流式优先），编辑与生成均走 generateContent，仅差别为是否带参考图
+        # Gemini 使用 generateContent；GPT 使用 OpenAI Images API。
         endpoint_path = self._STREAM_GEN_PATH if self.use_stream else self._GEN_PATH
 
         # 记录开始时间
@@ -352,7 +370,32 @@ class GeminiImagePlugin(Star):
         
         try:
             message_text = None
-            if self.use_stream:
+            if provider == "gpt":
+                from .utils.openai_images_api import generate_or_edit_image_openai
+                image_url, image_path, message_text = await generate_or_edit_image_openai(
+                    prompt=image_description,
+                    api_keys=[api_password] if api_password else [],
+                    model=model_name,
+                    api_base=api_base,
+                    input_images_b64=input_images,
+                    max_retry_attempts=self.max_retry_attempts,
+                    generation_config=merged_generation_config or None,
+                    timeout_seconds=self.request_timeout_seconds,
+                )
+            elif provider == "geminichat":
+                from .utils.gemini_chat_api import generate_or_edit_image_gemini_chat
+                image_url, image_path, message_text = await generate_or_edit_image_gemini_chat(
+                    prompt=image_description,
+                    api_keys=[api_password] if api_password else [],
+                    model=model_name,
+                    api_base=api_base,
+                    input_images_b64=input_images,
+                    max_retry_attempts=self.max_retry_attempts,
+                    temperature=effective_temperature,
+                    generation_config=merged_generation_config or None,
+                    timeout_seconds=self.request_timeout_seconds,
+                )
+            elif self.use_stream:
                 from .utils.gemini_images_api import generate_or_edit_image_gemini_stream
                 image_url, image_path, message_text = await generate_or_edit_image_gemini_stream(
                     prompt=image_description,
@@ -432,7 +475,7 @@ class GeminiImagePlugin(Star):
             yield event.plain_result(success_msg)
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.error(f"Gemini 生图/改图异常: {e}")
+            logger.error(f"{provider} 生图/改图异常: {e}")
             yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {str(e)}")
 
     async def _maybe_cleanup_images(self):
@@ -579,16 +622,14 @@ class GeminiImagePlugin(Star):
         async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=True, mode="edit", appended_generation_config=appended_params):
             yield res
 
-    @filter.command("手办化2")
-    async def cmd_figure2(self, event: AstrMessageEvent):
-        """手办化2（需携带/引用图片）：/手办化2 [描述]"""
-        # 提取全文本输入（英文提示通常也支持）
-        prompt_text = self._get_full_text_input(event, "/手办化2")
+    @filter.command("coser化")
+    async def cmd_coser(self, event: AstrMessageEvent):
+        """动漫角色转真人 Coser（需携带/引用图片）：/coser化 [补充要求]"""
+        prompt_text = self._get_full_text_input(event, "/coser化")
         prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
         if parse_error:
             yield event.plain_result(parse_error)
             return
-
         err = self._check_group_access(event)
         if err:
             yield event.plain_result(err)
@@ -597,24 +638,85 @@ class GeminiImagePlugin(Star):
         if not allowed:
             yield msg
             return
-        default_prompt2 = (
-            "Create a highly realistic 1/7 scale commercialized figure based on the illustration's adult character, "
-            "ensuring the appearance and content are safe, healthy, and free from any inappropriate elements. "
-            "Render the figure in a detailed, lifelike style and environment, placed on a shelf inside an ultra-realistic figure display cabinet, "
-            "mounted on a circular transparent acrylic base without any text. Maintain highly precise details in texture, material, and paintwork to enhance realism. "
-            "The cabinet scene should feature a natural depth of field with a smooth transition between foreground and background for a realistic photographic look. "
-            "Lighting should appear natural and adaptive to the scene, automatically adjusting based on the overall composition instead of being locked to a specific direction, "
-            "simulating the quality and reflection of real commercial photography. Other shelves in the cabinet should contain different figures which are slightly blurred due to being out of focus, enhancing spatial realism and depth."
-        )
-        final_prompt = f"{default_prompt2}\nUser additional requirements: {prompt}" if prompt else default_prompt2
-
-        # 检查是否包含图片
-        has_image = self._check_has_image(event)
-        if not has_image:
-            yield event.plain_result("手办化2需要携带或引用图片，请附图后再发送：/手办化2")
+        if not self._check_has_image(event):
+            yield event.plain_result("coser化需要携带或引用一张角色插画，请附图后再发送：/coser化")
             return
+        default_prompt = (
+            "以参考插画中的角色为唯一设计依据，生成真人 Coser 的高质量摄影照片。"
+            "准确保留角色的发型、发色、服装结构、配饰、色彩和辨识特征，将二次元设计自然转化为真实可制作的妆造与服装材质。"
+            "场景设在 Comiket 会场，采用自然的人像摄影、真实皮肤与布料质感、协调光影和浅景深。"
+            "人物应为成年人，五官自然，肢体完整，不改变角色核心身份，不添加无关文字或水印。"
+        )
+        final_prompt = f"{default_prompt}\n用户补充要求：{prompt}" if prompt else default_prompt
+        yield event.plain_result("🎨 收到请求，正在生成 [coser化]...")
         async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=True, mode="edit", appended_generation_config=appended_params):
             yield res
+
+    @filter.command("生成角色设定")
+    async def cmd_character_design(self, event: AstrMessageEvent):
+        """生成角色设定图（需携带/引用图片）：/生成角色设定 [补充要求]"""
+        prompt_text = self._get_full_text_input(event, "/生成角色设定")
+        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
+        err = self._check_group_access(event)
+        if err:
+            yield event.plain_result(err)
+            return
+        allowed, msg = await self._ensure_private_has_config(event)
+        if not allowed:
+            yield msg
+            return
+        if not self._check_has_image(event):
+            yield event.plain_result("生成角色设定需要携带或引用一张角色参考图，请附图后再发送：/生成角色设定")
+            return
+        default_prompt = (
+            "根据参考图生成一张专业、完整、排版清晰的角色设定图（Character Design Sheet）。"
+            "严格保持角色身份、面部、发型、服装、配饰和配色一致。"
+            "画面应包含：身高与头身比例设定；正面、侧面、背面三视图；多种典型表情；常见动作姿势；服装与关键配饰细节拆解。"
+            "使用干净的浅色背景和统一比例，分区明确，所有视图造型一致，适合动画、游戏或插画制作参考。"
+        )
+        final_prompt = f"{default_prompt}\n用户补充要求：{prompt}" if prompt else default_prompt
+        yield event.plain_result("🎨 收到请求，正在生成 [角色设定]...")
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=True, mode="edit", appended_generation_config=appended_params):
+            yield res
+
+    @filter.command("文章信息图")
+    async def cmd_article_infographic(self, event: AstrMessageEvent):
+        """将文章转换为信息图：/文章信息图 <文章内容>"""
+        prompt_text = self._get_full_text_input(event, "/文章信息图")
+        article, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
+        if not article:
+            yield event.plain_result("请在命令后提供文章内容：/文章信息图 <文章内容>")
+            return
+        err = self._check_group_access(event)
+        if err:
+            yield event.plain_result(err)
+            return
+        allowed, msg = await self._ensure_private_has_config(event)
+        if not allowed:
+            yield msg
+            return
+        final_prompt = (
+            "请把下面的文章制作成一张结构清晰、易于快速阅读的信息图。"
+            "先准确理解内容，将其翻译并提炼为简洁英文，保留核心观点、关键数据和逻辑关系。"
+            "图中只使用必要的大标题、短标签和极简说明，避免大段文字；信息层级清晰，阅读顺序明确。"
+            "加入丰富、可爱且与主题相关的卡通人物、图标和视觉元素，确保文字清晰可辨、事实忠于原文。\n"
+            f"文章内容：\n{article}"
+        )
+        has_image = self._check_has_image(event)
+        yield event.plain_result("🎨 收到请求，正在生成 [文章信息图]...")
+        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
+            yield res
+
+    @filter.command("提示词参考")
+    async def cmd_prompt_reference(self, event: AstrMessageEvent):
+        """返回 Nano Banana 提示词参考链接：/提示词参考"""
+        yield event.plain_result("Nano Banana 提示词参考：\nhttps://github.com/newaiproxy/nanobanana-prompt")
 
     @filter.command("aiimg帮助")
     async def cmd_help(self, event: AstrMessageEvent):
@@ -628,15 +730,17 @@ class GeminiImagePlugin(Star):
             "━━━━━━━━━━━━━━━━━━\n"
             "⚡ 快速指令（携带/引用图片）：\n"
             "• 手办化   → 将角色转为收藏级树脂手办风格\n"
-            "• 手办化2  → 英文提示词版本手办化\n"
+            "• coser化  → 将角色插画转换为真人 Coser 照片\n"
+            "• 生成角色设定 → 生成三视图、表情、动作及服装设定\n"
             "• 海报    → 生成16:9宣传海报风格\n"
-            "• 壁纸    → 生成高清桌面壁纸\n"
-            "• 卡片    → 生成精美卡片/名片风格\n"
-            "• 手机壁纸 → 生成9:16竖版手机壁纸\n"
             "• 表情包   → 生成Q版LINE风格表情包\n"
             "━━━━━━━━━━━━━━━━━━\n"
+            "📊 内容指令：\n"
+            "• 文章信息图 <文章内容> → 将文章提炼为英文信息图\n"
+            "• 提示词参考 → 返回 Nano Banana 提示词参考网站\n"
+            "━━━━━━━━━━━━━━━━━━\n"
             "⚙️ 私聊配置（仅私聊）：\n"
-            "• 设置ai配置 <api_base> <password> [model]\n"
+            "• 设置ai配置 <gemini|geminichat|gpt> <api_base> <key> <model>\n"
             "• 查看ai配置\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "💡 提示：命令末尾支持 -- 追加参数（生图/改图/快速指令）\n"
@@ -681,102 +785,6 @@ class GeminiImagePlugin(Star):
 
         # 先返回生成中提示
         yield event.plain_result("🎨 收到请求，正在生成 [海报]...")
-
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
-            yield res
-
-    @filter.command("壁纸")
-    async def cmd_wallpaper(self, event: AstrMessageEvent):
-        """壁纸（可携带/引用图片）：/壁纸 [描述]"""
-        prompt_text = self._get_full_text_input(event, "/壁纸")
-        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
-        if parse_error:
-            yield event.plain_result(parse_error)
-            return
-
-        err = self._check_group_access(event)
-        if err:
-            yield event.plain_result(err)
-            return
-        allowed, msg = await self._ensure_private_has_config(event)
-        if not allowed:
-            yield msg
-            return
-        default_prompt = (
-            "将画面转换为高清桌面壁纸风格，16:9宽屏比例，4K超高清质量。"
-            "构图优美，色彩和谐，视觉舒适。"
-            "画面干净整洁，适合作为电脑桌面背景。"
-            "细节丰富，光影自然，具有艺术美感和沉浸感。"
-        )
-        final_prompt = f"{default_prompt}\n用户补充要求：{prompt}" if prompt else default_prompt
-
-        has_image = self._check_has_image(event)
-
-        yield event.plain_result("🎨 收到请求，正在生成 [壁纸]...")
-
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
-            yield res
-
-    @filter.command("卡片")
-    async def cmd_card(self, event: AstrMessageEvent):
-        """卡片（可携带/引用图片）：/卡片 [描述]"""
-        prompt_text = self._get_full_text_input(event, "/卡片")
-        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
-        if parse_error:
-            yield event.plain_result(parse_error)
-            return
-
-        err = self._check_group_access(event)
-        if err:
-            yield event.plain_result(err)
-            return
-        allowed, msg = await self._ensure_private_has_config(event)
-        if not allowed:
-            yield msg
-            return
-        default_prompt = (
-            "将画面转换为精美卡片风格，3:2比例。"
-            "设计简洁大方，排版美观，适合用作名片、贺卡或收藏卡片。"
-            "色彩搭配和谐，具有精致的印刷品质感。"
-            "边框与装饰元素得当，整体风格统一协调。"
-        )
-        final_prompt = f"{default_prompt}\n用户补充要求：{prompt}" if prompt else default_prompt
-
-        has_image = self._check_has_image(event)
-
-        yield event.plain_result("🎨 收到请求，正在生成 [卡片]...")
-
-        async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
-            yield res
-
-    @filter.command("手机壁纸")
-    async def cmd_phone_wallpaper(self, event: AstrMessageEvent):
-        """手机壁纸（可携带/引用图片）：/手机壁纸 [描述]"""
-        prompt_text = self._get_full_text_input(event, "/手机壁纸")
-        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
-        if parse_error:
-            yield event.plain_result(parse_error)
-            return
-
-        err = self._check_group_access(event)
-        if err:
-            yield event.plain_result(err)
-            return
-        allowed, msg = await self._ensure_private_has_config(event)
-        if not allowed:
-            yield msg
-            return
-        default_prompt = (
-            "将画面转换为手机壁纸风格，9:16竖版比例，2K高清质量。"
-            "构图适合竖屏展示，主体位置考虑手机图标和时间显示区域。"
-            "色彩鲜明但不刺眼，适合日常使用。"
-            "画面简洁有层次，细节精致，具有现代感。"
-        )
-        final_prompt = f"{default_prompt}\n用户补充要求：{prompt}" if prompt else default_prompt
-
-        has_image = self._check_has_image(event)
-
-        yield event.plain_result("🎨 收到请求，正在生成 [手机壁纸]...")
 
         async for res in self.gemini_image_tool(event, image_description=final_prompt, use_reference_images=has_image, mode="edit" if has_image else "generate", appended_generation_config=appended_params):
             yield res
@@ -965,7 +973,7 @@ class GeminiImagePlugin(Star):
 
     @filter.command("设置ai配置")
     async def cmd_set_config(self, event: AstrMessageEvent):
-        """设置个人API配置（仅私聊）：/设置ai配置 <api_base> <api_password> [model_name]"""
+        """设置个人API配置：/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>"""
         # 检查是否为私聊
         if not self._is_private_chat(event):
             yield event.plain_result("该命令仅支持私聊使用")
@@ -975,19 +983,28 @@ class GeminiImagePlugin(Star):
         full_text = self._get_full_text_input(event, "/设置ai配置")
         parts = full_text.split()
         
-        if len(parts) < 2:
+        if len(parts) < 4:
             yield event.plain_result(
                 "❌ 参数不足\n\n"
                 "使用方法：\n"
-                "/设置ai配置 <api_base> <api_password> [model_name]\n\n"
+                "/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>\n\n"
                 "例如：\n"
-                "/设置ai配置 http://127.0.0.1:7861 your_password gemini-2.5-flash-image"
+                "/设置ai配置 gemini http://127.0.0.1:7861 your_password gemini-3-pro-image\n"
+                "/设置ai配置 geminichat http://127.0.0.1:7861 your_password gemini-3-pro-image\n"
+                "/设置ai配置 gpt https://api.openai.com sk-xxx gpt-image-2"
             )
             return
-        
-        api_base = parts[0]
-        api_password = parts[1]
-        model_name = parts[2] if len(parts) >= 3 else None
+
+        if parts[0].lower() not in ("gemini", "geminichat", "gpt"):
+            yield event.plain_result("❌ 类型必须是 gemini、geminichat 或 gpt")
+            return
+        provider = self._normalize_provider(parts[0])
+        api_base = parts[1]
+        api_password = parts[2]
+        model_name = parts[3].strip()
+        if not model_name:
+            yield event.plain_result("❌ model_name 不能为空")
+            return
         
         # 简单验证
         if not api_base.startswith("http://") and not api_base.startswith("https://"):
@@ -995,14 +1012,15 @@ class GeminiImagePlugin(Star):
             return
         
         # 保存配置
-        success = await self._save_user_config(event, api_base, api_password, model_name)
+        success = await self._save_user_config(event, provider, api_base, api_password, model_name)
         
         if success:
             yield event.plain_result(
                 "✅ 配置保存成功！\n\n"
+                f"类型: {provider}\n"
                 f"API Base: {api_base}\n"
                 f"API Password: {'*' * len(api_password)}\n\n"
-                f"Model: {model_name or '沿用默认/上次配置'}\n\n"
+                f"Model: {model_name}\n\n"
                 "现在您可以在私聊中使用生图功能了"
             )
         else:
@@ -1023,18 +1041,20 @@ class GeminiImagePlugin(Star):
             yield event.plain_result(
                 "❌ 您还没有设置个人配置\n\n"
                 "请使用以下命令设置：\n"
-                "/设置ai配置 <api_base> <api_password> [model_name]\n\n"
+                "/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>\n\n"
                 "例如：\n"
-                "/设置ai配置 http://127.0.0.1:7861 your_password gemini-2.5-flash-image"
+                "/设置ai配置 gemini http://127.0.0.1:7861 your_password gemini-3-pro-image"
             )
             return
         
         api_base = user_config.get("api_base", "未设置")
         api_password = user_config.get("api_password", "")
-        model_name = user_config.get("model_name", "未设置")
+        provider = self._normalize_provider(user_config.get("provider", "gemini"))
+        model_name = str(user_config.get("model_name") or "").strip() or "未设置（必填）"
         
         yield event.plain_result(
             "⚙️ 当前个人配置：\n\n"
+            f"类型: {provider}\n"
             f"API Base: {api_base}\n"
             f"API Password: {'*' * len(api_password)}\n\n"
             f"Model: {model_name}\n\n"

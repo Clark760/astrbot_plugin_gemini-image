@@ -1,7 +1,7 @@
-## Gemini Image Plugin (gcli2api)
+## Gemini / GPT Image Plugin
 
 - 标识名：`gemini-image`
-- 功能：通过 gcli2api 转发 Gemini 生图/改图，自动发送到 QQ（Napcat）。
+- 功能：支持 Gemini Nano Banana Pro 与 OpenAI GPT Image 2 生图/改图，自动发送到 QQ（Napcat）。
 - 设计：模块化/可扩展，解耦 API 客户端，与 AstrBot 交互通过指令组。
 
 ### 安装与配置
@@ -11,22 +11,43 @@
 
 ```json
 {
+  "provider": "gemini",
   "gcli2api_base_url": "http://127.0.0.1:7861",
   "gcli2api_api_password": "pwd",
-  "model_name": "gemini-2.5-flash-image",
+  "model_name": "gemini-3-pro-image",
   "max_retry_attempts": 3,
   "nap_server_address": "",
   "nap_server_port": 0
 }
 ```
 
+- `provider`: 可填写 `gemini`、`geminichat` 或 `gpt`。
+- `model_name`: 必填，插件会原样使用该名称，不自动推断或替换。请按实际服务商填写，例如 `gemini-3-pro-image`、`gpt-image-2` 或代理自定义模型名。
+- `gcli2api_base_url`: 为兼容旧配置保留该名称；GPT 模式可填写 `https://api.openai.com` 或兼容代理地址。
+- `gcli2api_api_password`: Gemini 模式填写 API Key/代理密码，GPT 模式填写 OpenAI API Key。
+
 ### 指令
 
 - `/生图 <提示词>`：纯文本生图。
 - `/改图 <提示词>`：基于消息中携带/引用的图片进行改图。
 - `/手办化`：携带/引用图片后，使用内置提示词进行“手办化”改图。
-- `/手办化2`：携带/引用图片后，使用更严格的内置规则进行“手办化”改图。
+- `/coser化 [补充要求]`：携带/引用角色插画，生成真人 Coser 摄影图。
+- `/生成角色设定 [补充要求]`：携带/引用角色图，生成比例、三视图、表情、动作和服装设定。
+- `/文章信息图 <文章内容>`：提炼文章核心信息并生成英文信息图，可携带参考图。
+- `/提示词参考`：返回 Nano Banana 提示词参考网站。
 - `/aiimg帮助`：查看用法说明。
+- `/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>`：在私聊中设置个人模型类型与 API，模型名必填。
+- `/查看ai配置`：查看个人配置。
+
+个人配置示例：
+
+```text
+/设置ai配置 gemini http://127.0.0.1:7861 your_password gemini-3-pro-image
+/设置ai配置 geminichat http://127.0.0.1:7861 your_password gemini-3-pro-image
+/设置ai配置 gpt https://api.openai.com sk-xxx gpt-image-2
+```
+
+新增创意指令的提示词参考自 [Nano Banana 提示词合集](https://github.com/newaiproxy/nanobanana-prompt)，并针对插件的生图/改图流程进行了扩展。
 
 ### 管控与限流
 
@@ -47,19 +68,36 @@
 - 优先使用 `callback_api_base`（AstrBot 全局配置）生成临时下载链接；失败则回退到本地文件发送。
 - 如配置了 Napcat 文件中转（`nap_server_address/port`），将先上传文件以便外部访问。
 
-### 与 gcli2api 的对接
+### API 对接
+
+Gemini：
 
 - 端点：`/v1beta/models/{model}:generateContent`（非流式），`/v1beta/models/{model}:streamGenerateContent`（流式，默认附加 `?alt=sse`）。
 - 鉴权：若配置了 `gcli2api_api_password`，将使用请求头 `x-goog-api-key: <password>`；也可通过 URL `?key=`（插件默认用请求头）。
 - 负载：`contents=[{role:user, parts:[{text}, {inlineData}...]}]`，与官方 SDK 示例一致；改图时将用户图片转为 inlineData 放入 parts。
 
+Gemini Chat（第三方 OpenAI 兼容网关）：
+
+- 类型填写 `geminichat`，模型名必须按网关实际提供的名称填写。
+- 端点：`/v1/chat/completions`；如果 API Base 已经以 `/v1` 结尾，不会重复拼接。
+- 请求使用 `messages`、多模态 `image_url` 内容块以及 `modalities: ["text", "image"]`。
+- 兼容从 `choices[0].message.content`、`content[]`、`message.images[]`、`choice.images[]` 和顶层 `images[]` 读取 data URL 或 HTTP 图片。
+- 如果兼容网关明确拒绝 `modalities` 参数，会自动移除该参数重试一次。
+
+GPT：
+
+- 生图端点：`/v1/images/generations`，JSON 请求。
+- 改图端点：`/v1/images/edits`，参考图通过 multipart `image[]` 上传。
+- 响应：读取 `data[0].b64_json`；兼容返回图片 URL 的代理服务。
+- GPT Image 2 不复用 Gemini SSE，使用非流式 Images API。
+
 ### 设计说明
 
 - 遵循 AstrBot 插件规范：`metadata.yaml` + `@register` + `filter.command`。
-- 扩展性：`utils/gemini_images_api.py` 封装 API 调用，端点与模型可配置。
+- 扩展性：三个 API 客户端分别封装 Gemini 原生、Gemini Chat 兼容和 OpenAI Images 协议。
 - 解耦：业务逻辑与网络请求分离，专注 gcli2api 转发与 AstrBot 交互。
 - 开闭原则：新增模型/路径仅需修改配置或替换 API 客户端，无需改动指令/对外接口。
 
 ### 注意事项
 
-- 请确保 gcli2api 已配置可用的 Google 凭证；插件侧仅负责负载与鉴权的适配。
+- Gemini 模式请确保 Google 凭证或 gcli2api 可用；GPT 模式请确保 OpenAI/兼容代理支持 Images API。
