@@ -17,6 +17,7 @@
   "gcli2api_api_password": "pwd",
   "model_name": "gemini-3-pro-image",
   "max_retry_attempts": 3,
+  "nap_file_forward_enabled": false,
   "nap_server_address": "",
   "nap_server_port": 0
 }
@@ -34,7 +35,7 @@
 - `/手办化`：携带/引用图片后，使用内置提示词进行“手办化”改图。
 - `/coser化 [补充要求]`：携带/引用角色插画，生成真人 Coser 摄影图。
 - `/生成角色设定 [补充要求]`：携带/引用角色图，生成比例、三视图、表情、动作和服装设定。
-- `/文章信息图 <文章内容>`：提炼文章核心信息并生成英文信息图，可携带参考图。
+- `/文章信息图 [文章内容]`：提炼文章核心信息并生成英文信息图；支持直接输入、引用 QQ 文字消息，或在引用内容后继续附加文字，也可携带参考图。
 - `/提示词参考`：返回 Nano Banana 提示词参考网站。
 - `/aiimg帮助`：查看用法说明。
 - `/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>`：在私聊中设置个人模型类型与 API，模型名必填。
@@ -67,7 +68,9 @@
 ### 发送到 QQ
 
 - 优先使用 `callback_api_base`（AstrBot 全局配置）生成临时下载链接；失败则回退到本地文件发送。
-- 如配置了 Napcat 文件中转（`nap_server_address/port`），将先上传文件以便外部访问。
+- AstrBot 与 NapCat 如果把宿主机同一个目录挂载为相同的 `/AstrBot/data`，请保持 `nap_file_forward_enabled: false`，NapCat 可直接读取生成图片路径。
+- `nap_file_forward_enabled` 只用于另行部署了本插件配套 TCP 文件接收服务的环境；3658 不是 NapCat 自带的服务端口。
+- 如果确实启用中转，Docker 内不能用 `localhost` 指代另一个容器，应填写目标服务名，并确保目标容器确实监听对应端口。
 
 ### API 对接
 

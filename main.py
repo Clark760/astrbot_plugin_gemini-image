@@ -23,7 +23,7 @@ from .utils.file_send_server import send_file
 from .utils.reference_images import image_component_to_data_url
 
 
-@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.2")
+@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.4")
 class GeminiImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -70,9 +70,14 @@ class GeminiImagePlugin(Star):
         # 运行时计数：group_id -> {"window_start": float, "count": int}
         self._group_call_bucket = {}
 
-        # Napcat 文件转发（可选）
-        self.nap_server_address = config.get("nap_server_address")
-        self.nap_server_port = config.get("nap_server_port")
+        # NapCat 自定义 TCP 文件中转（可选，默认关闭）。这不是 NapCat 自带端口；
+        # Docker 共享 /AstrBot/data 时应直接使用共享路径，无需开启。
+        self.nap_file_forward_enabled = bool(config.get("nap_file_forward_enabled", False))
+        self.nap_server_address = str(config.get("nap_server_address") or "").strip()
+        try:
+            self.nap_server_port = int(config.get("nap_server_port") or 0)
+        except (TypeError, ValueError):
+            self.nap_server_port = 0
 
         self._global_config_loaded = False
 
@@ -452,8 +457,12 @@ class GeminiImagePlugin(Star):
             # 计算耗时
             elapsed = time.time() - start_time
 
-            # 可选：通过 Napcat 文件服务器中转
-            if self.nap_server_address and self.nap_server_port:
+            # 可选：通过自定义 TCP 文件服务器中转。仅在显式启用后连接。
+            if (
+                self.nap_file_forward_enabled
+                and self.nap_server_address
+                and self.nap_server_port > 0
+            ):
                 try:
                     new_path = await send_file(image_path, self.nap_server_address, self.nap_server_port)
                     if new_path:
@@ -687,14 +696,24 @@ class GeminiImagePlugin(Star):
 
     @filter.command("文章信息图")
     async def cmd_article_infographic(self, event: AstrMessageEvent):
-        """将文章转换为信息图：/文章信息图 <文章内容>"""
+        """将当前或 QQ 引用消息中的文章转换为信息图。"""
         prompt_text = self._get_full_text_input(event, "/文章信息图")
-        article, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        current_article, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
         if parse_error:
             yield event.plain_result(parse_error)
             return
+        quoted_article = self._get_quoted_text_input(event)
+        article_parts = []
+        if quoted_article:
+            article_parts.append(f"引用消息内容：\n{quoted_article}")
+        if current_article:
+            label = "命令附加内容" if quoted_article else "文章正文"
+            article_parts.append(f"{label}：\n{current_article}")
+        article = "\n\n".join(article_parts)
         if not article:
-            yield event.plain_result("请在命令后提供文章内容：/文章信息图 <文章内容>")
+            yield event.plain_result(
+                "请在命令后提供文章内容，或引用一条包含文章文字的 QQ 消息后发送：/文章信息图"
+            )
             return
         err = self._check_group_access(event)
         if err:
@@ -748,8 +767,9 @@ class GeminiImagePlugin(Star):
             "  生成Q版 LINE 贴纸风格表情包。\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "📊 内容与参考：\n"
-            "• /文章信息图 <文章内容>\n"
-            "  提炼文章核心观点和数据，生成简洁英文信息图；可附参考图。\n"
+            "• /文章信息图 [文章内容]\n"
+            "  可直接输入文章，或引用一条 QQ 文字消息后发送本指令；\n"
+            "  也可在指令后继续附加要求，并可附参考图。\n"
             "• /提示词参考\n"
             "  返回 Nano Banana 提示词参考网站。\n"
             "━━━━━━━━━━━━━━━━━━\n"
@@ -895,6 +915,50 @@ class GeminiImagePlugin(Star):
             full_text = full_text[len(cmd_prefix):].strip()
 
         return full_text
+
+    def _get_quoted_text_input(self, event: AstrMessageEvent) -> str:
+        """提取 QQ 引用消息中的文字，兼容 Reply.chain 与 message_str。"""
+        message_obj = getattr(event, "message_obj", None)
+        root_chain = getattr(message_obj, "message", None) or []
+        blocks: List[str] = []
+        seen_reply_ids = set()
+
+        def append_block(value: Any):
+            text = str(value or "").strip()
+            if text and text not in blocks:
+                blocks.append(text)
+
+        def read_reply(reply: Reply):
+            reply_identity = id(reply)
+            if reply_identity in seen_reply_ids:
+                return
+            seen_reply_ids.add(reply_identity)
+
+            reply_chain = getattr(reply, "chain", None) or []
+            plain_parts = []
+            nested_replies = []
+            for component in reply_chain:
+                if isinstance(component, Plain):
+                    text = getattr(component, "text", None) or getattr(component, "content", "")
+                    if str(text or "").strip():
+                        plain_parts.append(str(text).strip())
+                elif isinstance(component, Reply):
+                    nested_replies.append(component)
+
+            if plain_parts:
+                append_block("\n".join(plain_parts))
+            else:
+                # 部分 OneBot/NapCat 事件没有填充 chain，只在这里保存引用正文。
+                append_block(getattr(reply, "message_str", None))
+
+            for nested_reply in nested_replies:
+                read_reply(nested_reply)
+
+        for component in root_chain:
+            if isinstance(component, Reply):
+                read_reply(component)
+
+        return "\n\n".join(blocks)
 
     def _coerce_cli_param_value(self, raw_value: str) -> Any:
         if raw_value is None:

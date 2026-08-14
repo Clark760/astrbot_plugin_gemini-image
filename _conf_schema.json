@@ -62,14 +62,19 @@
     "type": "int",
     "default": 3
   },
+  "nap_file_forward_enabled": {
+    "description": "启用自定义 TCP 文件中转（非 NapCat 自带功能；共享 /AstrBot/data 时不要开启）",
+    "type": "bool",
+    "default": false
+  },
   "nap_server_address": {
-    "description": "Napcat 文件转发主机（可选）",
+    "description": "自定义 TCP 文件接收服务主机（仅开启文件中转时填写）",
     "type": "string",
-    "default": "localhost"
+    "default": ""
   },
   "nap_server_port": {
-    "description": "Napcat 文件转发端口（可选）",
+    "description": "自定义 TCP 文件接收服务端口（仅开启文件中转时填写）",
     "type": "int",
-    "default": 3658
+    "default": 0
   }
 }
