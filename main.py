@@ -23,7 +23,7 @@ from .utils.file_send_server import send_file
 from .utils.reference_images import image_component_to_data_url
 
 
-@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.4")
+@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.5")
 class GeminiImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -725,8 +725,11 @@ class GeminiImagePlugin(Star):
             return
         final_prompt = (
             "请把下面的文章制作成一张结构清晰、易于快速阅读的信息图。"
-            "先准确理解内容，将其翻译并提炼为简洁英文，保留核心观点、关键数据和逻辑关系。"
-            "图中只使用必要的大标题、短标签和极简说明，避免大段文字；信息层级清晰，阅读顺序明确。"
+            "先准确理解并提炼内容，保留核心观点、关键数据和逻辑关系。"
+            "【语言硬性要求】无论原文是什么语言，信息图中的所有可见文字都必须使用简体中文，"
+            "包括主标题、副标题、章节标题、标签、图例、注释、数据说明和总结；禁止将内容翻译成英文。"
+            "无法替代的英文专有名词或缩写可以保留，但必须同时附上简短中文解释。"
+            "图中只使用必要的大标题、中文短标签和极简中文说明，避免大段文字；信息层级清晰，阅读顺序明确。"
             "加入丰富、可爱且与主题相关的卡通人物、图标和视觉元素，确保文字清晰可辨、事实忠于原文。\n"
             f"文章内容：\n{article}"
         )
@@ -768,6 +771,7 @@ class GeminiImagePlugin(Star):
             "━━━━━━━━━━━━━━━━━━\n"
             "📊 内容与参考：\n"
             "• /文章信息图 [文章内容]\n"
+            "  生成全部使用简体中文文字的信息图；\n"
             "  可直接输入文章，或引用一条 QQ 文字消息后发送本指令；\n"
             "  也可在指令后继续附加要求，并可附参考图。\n"
             "• /提示词参考\n"
