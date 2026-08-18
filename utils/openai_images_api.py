@@ -123,9 +123,7 @@ async def _parse_image_response(
 
 
 def _filter_image_parameters(parameters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Only forward parameters supported by the OpenAI Images API."""
-    if not isinstance(parameters, dict):
-        return {}
+    """Only forward supported parameters; GPT image quality defaults to high."""
     aliases = {
         "imageSize": "size",
         "image_size": "size",
@@ -140,10 +138,13 @@ def _filter_image_parameters(parameters: Optional[Dict[str, Any]]) -> Dict[str, 
         "n": "n",
     }
     result: Dict[str, Any] = {}
-    for key, value in parameters.items():
-        mapped = aliases.get(key)
-        if mapped and value is not None:
-            result[mapped] = value
+    if isinstance(parameters, dict):
+        for key, value in parameters.items():
+            mapped = aliases.get(key)
+            if mapped and value is not None:
+                result[mapped] = value
+    # Apply to both /images/generations and /images/edits. Explicit user input wins.
+    result.setdefault("quality", "high")
     return result
 
 

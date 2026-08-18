@@ -23,7 +23,7 @@ from .utils.file_send_server import send_file
 from .utils.reference_images import image_component_to_data_url
 
 
-@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.5")
+@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.7")
 class GeminiImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -534,12 +534,22 @@ class GeminiImagePlugin(Star):
 
     @filter.command("生图")
     async def cmd_generate(self, event: AstrMessageEvent):
-        """生图：/生图 <提示词>"""
+        """生图：直接输入提示词，或引用 QQ 文字消息。"""
         # 提取全文本输入，解决图文混排导致的 GreedyStr 失效
         prompt_text = self._get_full_text_input(event, "/生图")
-        prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
+        current_prompt, appended_params, parse_error = self._split_prompt_and_append_params(prompt_text)
         if parse_error:
             yield event.plain_result(parse_error)
+            return
+        quoted_prompt = self._get_quoted_text_input(event)
+        if quoted_prompt and current_prompt:
+            prompt = f"引用消息内容：\n{quoted_prompt}\n\n用户补充要求：\n{current_prompt}"
+        else:
+            prompt = quoted_prompt or current_prompt
+        if not prompt:
+            yield event.plain_result(
+                "请在命令后提供提示词，或引用一条包含文字的 QQ 消息后发送：/生图"
+            )
             return
 
         # 群控制与限流
@@ -554,7 +564,8 @@ class GeminiImagePlugin(Star):
             return
 
         # 先返回生成中提示
-        display_prompt = prompt[:20] + '...' if len(prompt) > 20 else prompt
+        preview_source = current_prompt or quoted_prompt
+        display_prompt = preview_source[:20] + '...' if len(preview_source) > 20 else preview_source
         yield event.plain_result(f"🎨 收到请求，正在生成 [{display_prompt}]...")
 
         # 然后执行生成并发送结果
@@ -750,8 +761,9 @@ class GeminiImagePlugin(Star):
             "🎨 AI 图像生成插件完整帮助\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "📝 基础指令：\n"
-            "• /生图 <提示词>\n"
-            "  纯文本生成图片，不读取消息中的参考图。\n"
+            "• /生图 [提示词]\n"
+            "  可直接输入提示词，或引用一条 QQ 文字消息后发送；\n"
+            "  指令后的文字会作为引用内容的补充要求，不读取参考图。\n"
             "• /改图 <提示词>\n"
             "  必须携带或引用图片，根据提示词编辑图片。\n"
             "━━━━━━━━━━━━━━━━━━\n"
@@ -790,7 +802,7 @@ class GeminiImagePlugin(Star):
             "🔌 接口类型：\n"
             "• gemini：Gemini 原生 generateContent 接口\n"
             "• geminichat：OpenAI兼容 /chat/completions 接口\n"
-            "• gpt：OpenAI兼容 Images API（生成/编辑）\n"
+            "• gpt：OpenAI兼容 Images API（生成/编辑），quality 默认 high\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "💡 追加参数：\n"
             "生成类指令末尾支持 --参数 值 或 --参数=值。\n"
