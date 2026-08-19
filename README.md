@@ -1,7 +1,7 @@
-## Gemini / GPT Image Plugin
+## Gemini / DALL-E / GPT Image Plugin
 
 - 标识名：`gemini-image`
-- 功能：支持 Gemini Nano Banana Pro 与 OpenAI GPT Image 2 生图/改图，自动发送到 QQ（Napcat）。
+- 功能：支持 Gemini Nano Banana Pro、第三方 DALL-E Generations 网关与 OpenAI GPT Image 2 生图/改图，自动发送到 QQ（Napcat）。
 - 设计：模块化/可扩展，解耦 API 客户端，与 AstrBot 交互通过指令组。
 
 ### 安装与配置
@@ -23,10 +23,10 @@
 }
 ```
 
-- `provider`: 可填写 `gemini`、`geminichat` 或 `gpt`。
+- `provider`: 可填写 `gemini`、`geminichat`、`dalle` 或 `gpt`。
 - `model_name`: 必填，插件会原样使用该名称，不自动推断或替换。请按实际服务商填写，例如 `gemini-3-pro-image`、`gpt-image-2` 或代理自定义模型名。
-- `gcli2api_base_url`: 为兼容旧配置保留该名称；GPT 模式可填写 `https://api.openai.com` 或兼容代理地址。
-- `gcli2api_api_password`: Gemini 模式填写 API Key/代理密码，GPT 模式填写 OpenAI API Key。
+- `gcli2api_base_url`: 为兼容旧配置保留该名称；DALL-E/GPT 模式填写对应网关或 OpenAI API Base。
+- `gcli2api_api_password`: 填写对应服务的 API Key 或代理密码。
 
 ### 指令
 
@@ -38,7 +38,7 @@
 - `/文章信息图 [文章内容]`：提炼文章核心信息并生成全部使用简体中文文字的信息图；支持直接输入、引用 QQ 文字消息，或在引用内容后继续附加文字，也可携带参考图。
 - `/提示词参考`：返回 Nano Banana 提示词参考网站。
 - `/aiimg帮助`：查看用法说明。
-- `/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>`：在私聊中设置个人模型类型与 API，模型名必填。
+- `/设置ai配置 <gemini|geminichat|dalle|gpt> <api_base> <api_key> <model_name>`：在私聊中设置个人模型类型与 API，模型名必填。
 - `/查看ai配置`：查看个人配置。
 
 个人配置示例：
@@ -46,6 +46,7 @@
 ```text
 /设置ai配置 gemini http://127.0.0.1:7861 your_password gemini-3-pro-image
 /设置ai配置 geminichat http://127.0.0.1:7861 your_password gemini-3-pro-image
+/设置ai配置 dalle https://api.apilio.ai sk-xxx gemini-3.1-flash-image-preview-4k
 /设置ai配置 gpt https://api.openai.com sk-xxx gpt-image-2
 ```
 
@@ -88,6 +89,14 @@ Gemini Chat（第三方 OpenAI 兼容网关）：
 - 兼容从 `choices[0].message.content`、`content[]`、`message.images[]`、`choice.images[]` 和顶层 `images[]` 读取 data URL 或 HTTP 图片。
 - 如果兼容网关明确拒绝 `modalities` 参数，会自动移除该参数重试一次。
 
+DALL-E Generations（第三方扩展网关）：
+
+- 类型填写 `dalle`，端点固定为 `/v1/images/generations`，文生图和图生图都使用 JSON 请求。
+- 参考图以 Data URL 数组放入 `image` 字段，不再改走 multipart `/images/edits`。
+- 支持 `--aspect_ratio 16:9`、`--size 2048x1152`、`--image_size 4K` 等网关参数；是否生效取决于实际模型。
+- 除标准 `data[].url`、`data[].b64_json` 外，还会扫描响应文本中的 Markdown 或裸 PNG/JPG/WEBP 链接。
+- 找到图片链接时会下载并校验图片内容，再向 QQ 发送图片；不会把带图片链接的整段 Markdown 原样发给用户。
+
 GPT：
 
 - 生图端点：`/v1/images/generations`，JSON 请求。
@@ -99,7 +108,7 @@ GPT：
 ### 设计说明
 
 - 遵循 AstrBot 插件规范：`metadata.yaml` + `@register` + `filter.command`。
-- 扩展性：三个 API 客户端分别封装 Gemini 原生、Gemini Chat 兼容和 OpenAI Images 协议。
+- 扩展性：四个 API 客户端分别封装 Gemini 原生、Gemini Chat 兼容、第三方 DALL-E Generations 和 OpenAI Images 协议。
 - 解耦：业务逻辑与网络请求分离，专注 gcli2api 转发与 AstrBot 交互。
 - 开闭原则：新增模型/路径仅需修改配置或替换 API 客户端，无需改动指令/对外接口。
 

@@ -1,8 +1,8 @@
 {
   "provider": {
-    "description": "图片模型类型：gemini 原生接口，geminichat 为 /chat/completions，gpt 为 GPT Image 2",
+    "description": "图片模型类型：gemini 原生接口，geminichat 为 /chat/completions，dalle 为扩展 /images/generations，gpt 为 OpenAI Images API",
     "type": "string",
-    "options": ["gemini", "geminichat", "gpt"],
+    "options": ["gemini", "geminichat", "dalle", "gpt"],
     "default": "gemini"
   },
   "model_name": {

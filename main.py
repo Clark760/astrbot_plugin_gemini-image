@@ -23,7 +23,7 @@ from .utils.file_send_server import send_file
 from .utils.reference_images import image_component_to_data_url
 
 
-@register("gemini-image", "薄暝", "支持 Gemini 与 GPT 的生图/改图并发送到 QQ", "0.7.7")
+@register("gemini-image", "薄暝", "支持 Gemini、DALL-E 与 GPT 的生图/改图并发送到 QQ", "0.8.0")
 class GeminiImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -84,7 +84,7 @@ class GeminiImagePlugin(Star):
     @staticmethod
     def _normalize_provider(provider: Any) -> str:
         value = str(provider or "gemini").strip().lower()
-        return value if value in ("gemini", "geminichat", "gpt") else "gemini"
+        return value if value in ("gemini", "geminichat", "dalle", "gpt") else "gemini"
 
     def _is_private_chat(self, event: AstrMessageEvent) -> bool:
         """更稳健地判断是否私聊，避免仅依赖 group_id 导致误判。"""
@@ -223,10 +223,11 @@ class GeminiImagePlugin(Star):
         return (
             "❌ 私聊使用需要先配置个人API\n\n"
             "请使用以下命令设置：\n"
-            "/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>\n\n"
+            "/设置ai配置 <gemini|geminichat|dalle|gpt> <api_base> <api_key> <model_name>\n\n"
             "例如：\n"
             "/设置ai配置 gemini http://127.0.0.1:7861 your_password gemini-3-pro-image\n"
             "/设置ai配置 geminichat http://127.0.0.1:7861 your_password gemini-3-pro-image\n"
+            "/设置ai配置 dalle https://api.apilio.ai sk-xxx gemini-3.1-flash-image-preview-4k\n"
             "/设置ai配置 gpt https://api.openai.com sk-xxx gpt-image-2\n\n"
             "查看当前配置请使用：/查看ai配置"
         )
@@ -370,7 +371,7 @@ class GeminiImagePlugin(Star):
                 yield event.plain_result("参数错误：`--temperature` 必须是数字。")
                 return
 
-        # Gemini 使用 generateContent；GPT 使用 OpenAI Images API。
+        # Gemini 使用 generateContent；DALL-E 使用扩展 Generations；GPT 使用 OpenAI Images API。
         endpoint_path = self._STREAM_GEN_PATH if self.use_stream else self._GEN_PATH
 
         # 记录开始时间
@@ -378,7 +379,19 @@ class GeminiImagePlugin(Star):
         
         try:
             message_text = None
-            if provider == "gpt":
+            if provider == "dalle":
+                from .utils.dalle_images_api import generate_or_edit_image_dalle
+                image_url, image_path, message_text = await generate_or_edit_image_dalle(
+                    prompt=image_description,
+                    api_keys=[api_password] if api_password else [],
+                    model=model_name,
+                    api_base=api_base,
+                    input_images_b64=input_images,
+                    max_retry_attempts=self.max_retry_attempts,
+                    generation_config=merged_generation_config or None,
+                    timeout_seconds=self.request_timeout_seconds,
+                )
+            elif provider == "gpt":
                 from .utils.openai_images_api import generate_or_edit_image_openai
                 image_url, image_path, message_text = await generate_or_edit_image_openai(
                     prompt=image_description,
@@ -791,17 +804,19 @@ class GeminiImagePlugin(Star):
             "━━━━━━━━━━━━━━━━━━\n"
             "⚙️ 私聊个人配置：\n"
             "• /设置ai配置 <类型> <api_base> <api_key> <model_name>\n"
-            "  类型只能是 gemini、geminichat 或 gpt，模型名必填。\n"
+            "  类型只能是 gemini、geminichat、dalle 或 gpt，模型名必填。\n"
             "• /查看ai配置\n"
             "  查看当前个人类型、地址和模型。\n"
             "示例：\n"
             "/设置ai配置 gemini http://127.0.0.1:7861 pwd gemini-3-pro-image\n"
             "/设置ai配置 geminichat http://127.0.0.1:7861 pwd gemini-3-pro-image\n"
+            "/设置ai配置 dalle https://api.apilio.ai sk-xxx gemini-3.1-flash-image-preview-4k\n"
             "/设置ai配置 gpt https://api.openai.com sk-xxx gpt-image-2\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "🔌 接口类型：\n"
             "• gemini：Gemini 原生 generateContent 接口\n"
             "• geminichat：OpenAI兼容 /chat/completions 接口\n"
+            "• dalle：第三方扩展 /images/generations 接口，支持 image 参考图数组\n"
             "• gpt：OpenAI兼容 Images API（生成/编辑），quality 默认 high\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "💡 追加参数：\n"
@@ -1092,7 +1107,7 @@ class GeminiImagePlugin(Star):
 
     @filter.command("设置ai配置")
     async def cmd_set_config(self, event: AstrMessageEvent):
-        """设置个人API配置：/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>"""
+        """设置个人API配置：/设置ai配置 <gemini|geminichat|dalle|gpt> <api_base> <api_key> <model_name>"""
         # 检查是否为私聊
         if not self._is_private_chat(event):
             yield event.plain_result("该命令仅支持私聊使用")
@@ -1106,16 +1121,17 @@ class GeminiImagePlugin(Star):
             yield event.plain_result(
                 "❌ 参数不足\n\n"
                 "使用方法：\n"
-                "/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>\n\n"
+                "/设置ai配置 <gemini|geminichat|dalle|gpt> <api_base> <api_key> <model_name>\n\n"
                 "例如：\n"
                 "/设置ai配置 gemini http://127.0.0.1:7861 your_password gemini-3-pro-image\n"
                 "/设置ai配置 geminichat http://127.0.0.1:7861 your_password gemini-3-pro-image\n"
+                "/设置ai配置 dalle https://api.apilio.ai sk-xxx gemini-3.1-flash-image-preview-4k\n"
                 "/设置ai配置 gpt https://api.openai.com sk-xxx gpt-image-2"
             )
             return
 
-        if parts[0].lower() not in ("gemini", "geminichat", "gpt"):
-            yield event.plain_result("❌ 类型必须是 gemini、geminichat 或 gpt")
+        if parts[0].lower() not in ("gemini", "geminichat", "dalle", "gpt"):
+            yield event.plain_result("❌ 类型必须是 gemini、geminichat、dalle 或 gpt")
             return
         provider = self._normalize_provider(parts[0])
         api_base = parts[1]
@@ -1160,7 +1176,7 @@ class GeminiImagePlugin(Star):
             yield event.plain_result(
                 "❌ 您还没有设置个人配置\n\n"
                 "请使用以下命令设置：\n"
-                "/设置ai配置 <gemini|geminichat|gpt> <api_base> <api_key> <model_name>\n\n"
+                "/设置ai配置 <gemini|geminichat|dalle|gpt> <api_base> <api_key> <model_name>\n\n"
                 "例如：\n"
                 "/设置ai配置 gemini http://127.0.0.1:7861 your_password gemini-3-pro-image"
             )

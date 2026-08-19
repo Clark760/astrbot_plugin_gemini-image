@@ -1,5 +1,5 @@
 name: astrbot_plugin_gemini_image_fork # 这是你的插件的唯一识别名（必须是合法 Python 模块名）。
-desc: 对接 Gemini Nano Banana Pro 与 OpenAI GPT Image 2 生图/改图并发送到 QQ # 插件简短描述
-version: v0.7.7 # 插件版本号
+desc: 对接 Gemini、DALL-E 兼容网关与 OpenAI GPT Image 2 生图/改图并发送到 QQ # 插件简短描述
+version: v0.8.0 # 插件版本号
 author: mingo # 作者
 repo: https://github.com/Clark760/astrbot_plugin_gemini-image # 插件的仓库地址（占位）
