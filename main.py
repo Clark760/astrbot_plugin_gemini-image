@@ -168,12 +168,9 @@ class GeminiImagePlugin(Star):
             self._global_config_loaded = True
 
     async def _get_user_config(self, event: AstrMessageEvent) -> Optional[dict]:
-        """获取用户个人配置（仅私聊）"""
+        """按发送者获取个人配置，群聊与私聊共用。"""
         try:
-            if not self._is_private_chat(event):
-                return None
-            
-            # 私聊，尝试获取用户ID
+            # 尝试获取发送者 ID，避免使用群 ID 作为个人配置的标识。
             user_id = None
             try:
                 user_id = event.get_sender_id()
@@ -193,7 +190,7 @@ class GeminiImagePlugin(Star):
             return None
 
     async def _save_user_config(self, event: AstrMessageEvent, provider: str, api_base: str, api_password: str, model_name: str) -> bool:
-        """保存用户个人配置（仅私聊）"""
+        """保存发送者的个人配置，群聊与私聊共用。"""
         try:
             user_id = None
             try:
@@ -308,7 +305,7 @@ class GeminiImagePlugin(Star):
         # 尝试执行 images 目录定期清理
         await self._maybe_cleanup_images()
 
-        # 检查是否为私聊，如果是则尝试加载用户个人配置
+        # 优先使用发送者的个人配置；群聊未设置时使用插件默认配置。
         provider = self.provider
         api_base = self.api_base
         api_password = self.gcli2api_api_password
@@ -329,10 +326,10 @@ class GeminiImagePlugin(Star):
                 yield event.plain_result(self._private_config_required_message())
                 return
 
+        config_scope = "个人配置" if user_config else "公共配置"
         model_name = str(configured_model or "").strip()
         if not model_name:
-            scope = "个人配置" if user_config else "插件全局设置"
-            yield event.plain_result(f"❌ {scope}缺少必填的 model_name，请先填写实际模型名称。")
+            yield event.plain_result(f"❌ {config_scope}缺少必填的 model_name，请先填写实际模型名称。")
             return
 
         # 为提示词添加图片生成目标提示，避免多模态模型返回纯文本
@@ -359,6 +356,7 @@ class GeminiImagePlugin(Star):
             yield event.plain_result(
                 "❌ 参考图片读取或格式转换失败，已停止本次改图，未降级为普通生图。"
                 "请尝试重新发送 JPG/PNG/WEBP 图片，并查看日志中的“参考图片读取/转换失败”详情。"
+                f"\n使用配置：{config_scope}"
             )
             return
 
@@ -368,7 +366,7 @@ class GeminiImagePlugin(Star):
             try:
                 effective_temperature = float(merged_generation_config.pop("temperature"))
             except Exception:
-                yield event.plain_result("参数错误：`--temperature` 必须是数字。")
+                yield event.plain_result(f"参数错误：`--temperature` 必须是数字。\n使用配置：{config_scope}")
                 return
 
         # Gemini 使用 generateContent；DALL-E 使用扩展 Generations；GPT 使用 OpenAI Images API。
@@ -462,9 +460,9 @@ class GeminiImagePlugin(Star):
 
             if not image_path:
                 if message_text:
-                    yield event.plain_result(message_text)
+                    yield event.plain_result(f"{message_text}\n使用配置：{config_scope}")
                 else:
-                    yield event.plain_result("图像生成失败，请检查 API 配置与模型名称。")
+                    yield event.plain_result(f"图像生成失败，请检查 API 配置与模型名称。\n使用配置：{config_scope}")
                 return
 
             # 计算耗时
@@ -486,7 +484,7 @@ class GeminiImagePlugin(Star):
             image_target = await self.resolve_image_target_for_send(image_path)
             
             # 构建成功消息
-            success_msg = f"✅ 生成成功 ({elapsed:.2f}s)"
+            success_msg = f"✅ 生成成功 ({elapsed:.2f}s)\n使用配置：{config_scope}"
             
             # 避免在私聊中触发 Node/合并转发路径导致 NapCat 图片发送失败
             if hasattr(event, "image_result"):
@@ -501,7 +499,7 @@ class GeminiImagePlugin(Star):
         except Exception as e:
             elapsed = time.time() - start_time
             logger.error(f"{provider} 生图/改图异常: {e}")
-            yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {str(e)}")
+            yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n使用配置：{config_scope}\n原因: {str(e)}")
 
     async def _maybe_cleanup_images(self):
         """按配置每隔 N 天清理一次 images 目录（清空目录）。"""
@@ -802,11 +800,13 @@ class GeminiImagePlugin(Star):
             "• /提示词参考\n"
             "  返回 Nano Banana 提示词参考网站。\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "⚙️ 私聊个人配置：\n"
+            "⚙️ 个人配置（群聊、私聊均可设置）：\n"
             "• /设置ai配置 <类型> <api_base> <api_key> <model_name>\n"
             "  类型只能是 gemini、geminichat、dalle 或 gpt，模型名必填。\n"
             "• /查看ai配置\n"
             "  查看当前个人类型、地址和模型。\n"
+            "  个人配置在群聊和私聊中共用，仅对本人有效。\n"
+            "  群聊未设置个人配置时使用插件默认配置；私聊需先设置。\n"
             "示例：\n"
             "/设置ai配置 gemini http://127.0.0.1:7861 pwd gemini-3-pro-image\n"
             "/设置ai配置 geminichat http://127.0.0.1:7861 pwd gemini-3-pro-image\n"
@@ -1108,11 +1108,6 @@ class GeminiImagePlugin(Star):
     @filter.command("设置ai配置")
     async def cmd_set_config(self, event: AstrMessageEvent):
         """设置个人API配置：/设置ai配置 <gemini|geminichat|dalle|gpt> <api_base> <api_key> <model_name>"""
-        # 检查是否为私聊
-        if not self._is_private_chat(event):
-            yield event.plain_result("该命令仅支持私聊使用")
-            return
-        
         # 提取参数
         full_text = self._get_full_text_input(event, "/设置ai配置")
         parts = full_text.split()
@@ -1156,23 +1151,25 @@ class GeminiImagePlugin(Star):
                 f"API Base: {api_base}\n"
                 f"API Password: {'*' * len(api_password)}\n\n"
                 f"Model: {model_name}\n\n"
-                "现在您可以在私聊中使用生图功能了"
+                "此个人配置在群聊和私聊中均生效，仅对您本人有效"
             )
         else:
             yield event.plain_result("❌ 配置保存失败，请稍后重试")
 
     @filter.command("查看ai配置")
     async def cmd_view_config(self, event: AstrMessageEvent):
-        """查看个人API配置（仅私聊）：/查看ai配置"""
-        # 检查是否为私聊
-        if not self._is_private_chat(event):
-            yield event.plain_result("该命令仅支持私聊使用")
-            return
-        
+        """查看个人API配置（群聊、私聊均可）：/查看ai配置"""
         # 获取配置
         user_config = await self._get_user_config(event)
         
         if not user_config:
+            if not self._is_private_chat(event):
+                yield event.plain_result(
+                    "ℹ️ 您还没有设置个人配置，当前群聊使用插件默认配置。\n\n"
+                    "如需使用自己的 API，请使用：\n"
+                    "/设置ai配置 <gemini|geminichat|dalle|gpt> <api_base> <api_key> <model_name>"
+                )
+                return
             yield event.plain_result(
                 "❌ 您还没有设置个人配置\n\n"
                 "请使用以下命令设置：\n"

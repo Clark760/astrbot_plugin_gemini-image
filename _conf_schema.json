@@ -1,5 +1,6 @@
 {
   "provider": {
+    "hint": "群聊默认接口类型，未设置个人配置时使用",
     "description": "图片模型类型：gemini 原生接口，geminichat 为 /chat/completions，dalle 为扩展 /images/generations，gpt 为 OpenAI Images API",
     "type": "string",
     "options": ["gemini", "geminichat", "dalle", "gpt"],
@@ -8,15 +9,17 @@
   "model_name": {
     "description": "模型名称（必填，按实际服务商提供的模型名填写）",
     "type": "string",
-    "hint": "必填，例如 gemini-3-pro-image、gpt-image-2 或代理提供的模型名",
+    "hint": "群聊默认模型，未设置个人配置时使用。必填，例如 gemini-3-pro-image、gpt-image-2 或代理提供的模型名",
     "default": ""
   },
   "gcli2api_base_url": {
+    "hint": "群聊默认 API 地址，未设置个人配置时使用",
     "description": "API 基础地址（gemini 可填 gcli2api；gpt 可填 https://api.openai.com 或兼容代理）",
     "type": "string",
     "default": "http://127.0.0.1:7861"
   },
   "gcli2api_api_password": {
+    "hint": "群聊默认 API 密钥/密码，未设置个人配置时使用",
     "description": "API 密钥/密码（Gemini 使用 x-goog-api-key/Bearer，GPT 使用 Bearer）",
     "type": "string",
     "default": "pwd"
